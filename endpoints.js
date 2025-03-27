@@ -68,6 +68,14 @@ router.post("/clients/register", (req, res) => {
  *     "mot_de_passe": "hashpassword1"
  * }
  */
+/**
+ * ➤ ROUTE : Connexion d'un client (Génération de JWT)
+ * ➤ URL : POST /api/clients/login
+ * {
+ *     "email": "jean.dupont@email.com",
+ *     "mot_de_passe": "hashpassword1"
+ * }
+ */
 router.post("/clients/login", (req, res) => {
     const { email, mot_de_passe } = req.body;
 
@@ -119,19 +127,43 @@ router.get("/logout", (req, res) => {
 /**
  * ➤ ROUTE : Récupérer tous les produits
  */
-router.get("/produits", verifyToken, authorizeRoles("client"), (req, res) => {
-    db.query("SELECT * FROM produits", (err, result) => {
+router.get("/produits", (req, res) => {
+    db.query("SELECT * FROM produits",
+        (err, result) => {
         if (err) return res.status(500).json({ message: "❌ Erreur serveur" });
         res.json(result);
     });
 });
 
 /**
+
+ * ➤ ROUTE : BEST SELLERS - Page d'accueil
+ */
+router.get("/home-best-sellers", (req, res) => {
+    db.query("SELECT * FROM produits JOIN variante_poids ON produits.id = variante_poids.id_produit LIMIT 0,6", (err, result) => {
+        if (err) return res.status(500).json({ message: "❌ Erreur serveur" });
+        res.json(result);
+    });
+});
+
+/**
+ * ➤ ROUTE : Récupérer variantes de poids d'un produit
+ */
+router.get("/variantes/poids/:id", (req, res) => {
+    const id = parseInt(req.params.id);
+
+    db.query("SELECT poids, prix FROM variante_poids WHERE id_produit = ?", [id], (err, result) => {
+        if (err) return res.status(500).json({message: "Erreur serveur"});
+        console.log(res.json(result));
+    })
+})
+
+/**
  * ➤ ROUTE : Récupérer un produit par son ID
  * ➤ URL : GET /api/produits/:id
  * ➤ Exemple d'utilisation : GET /api/produits/1
  */
-router.get("/produits/:id", (req, res) => {
+router.get("/produits/:id", (req , res) => {
     const id = parseInt(req.params.id);
 
     db.query("SELECT * FROM produits WHERE id = ?", [id], (err, result) => {
@@ -140,6 +172,166 @@ router.get("/produits/:id", (req, res) => {
     });
 });
 
+
+/**
+ * ➤ ROUTE : Ajouter un produit au panier
+ * ➤ URL : POST /api/panier/ajouter
+ * ➤ Body attendu (JSON) :
+ * {
+ *     "client_id": 1,
+ *     "produit_id": 2,
+ *     "variante_poids": "250",
+ *     "quantite": 1,
+ *     "prix": 12.50
+ * }
+ */
+router.post("/panier/ajouter", (req, res) => {
+    const { client_id, produit_id, variante_poids, quantite, prix } = req.body;
+
+    // Si l'utilisateur est connecté, sauvegarde dans la base de données
+    if (client_id) {
+        // Vérifier si le produit est déjà dans le panier
+        db.query(
+            "SELECT * FROM panier WHERE client_id = ? AND produit_id = ? AND variante_poids = ?",
+            [client_id, produit_id, variante_poids],
+            (err, result) => {
+                if (err) return res.status(500).json({ message: "❌ Erreur serveur" });
+
+                if (result.length > 0) {
+                    // Le produit existe déjà, mettre à jour la quantité
+                    const nouvelleQuantite = result[0].quantite + quantite;
+
+                    db.query(
+                        "UPDATE panier SET quantite = ? WHERE id = ?",
+                        [nouvelleQuantite, result[0].id],
+                        (err, updateResult) => {
+                            if (err) return res.status(500).json({ message: "❌ Erreur de mise à jour" });
+
+                            return res.status(200).json({
+                                message: "✅ Quantité mise à jour dans le panier",
+                                panier_id: result[0].id
+                            });
+                        }
+                    );
+                } else {
+                    // Le produit n'existe pas, l'ajouter au panier
+                    db.query(
+                        "INSERT INTO panier (client_id, produit_id, variante_poids, quantite, prix) VALUES (?, ?, ?, ?, ?)",
+                        [client_id, produit_id, variante_poids, quantite, prix],
+                        (err, insertResult) => {
+                            if (err) return res.status(500).json({ message: "❌ Erreur d'ajout au panier" });
+
+                            return res.status(201).json({
+                                message: "✅ Produit ajouté au panier",
+                                panier_id: insertResult.insertId
+                            });
+                        }
+                    );
+                }
+            }
+        );
+    } else {
+        // Pour les utilisateurs non connectés, on renvoie les données pour stockage local
+        return res.status(200).json({
+            message: "✅ Produit ajouté au panier (session locale)",
+            produit: { produit_id, variante_poids, quantite, prix }
+        });
+    }
+});
+
+/**
+ * ➤ ROUTE : Récupérer le panier d'un client
+ * ➤ URL : GET /api/panier/:client_id
+ */
+router.get("/panier/:client_id", (req, res) => {
+    const client_id = req.params.client_id;
+
+    db.query(
+        `SELECT p.id, p.produit_id, p.variante_poids, p.quantite, p.prix, 
+                prod.nom, prod.image 
+         FROM panier p
+         JOIN produits prod ON p.produit_id = prod.id
+         WHERE p.client_id = ?`,
+        [client_id],
+        (err, result) => {
+            if (err) return res.status(500).json({ message: "❌ Erreur serveur" });
+
+            const total = result.reduce((sum, item) => sum + (item.prix * item.quantite), 0);
+
+            return res.status(200).json({
+                items: result,
+                total: total,
+                count: result.length
+            });
+        }
+    );
+});
+
+/**
+ * ➤ ROUTE : Supprimer un article du panier
+ * ➤ URL : DELETE /api/panier/:id
+ */
+/**
+ * ➤ ROUTE : Supprimer un article du panier
+ * ➤ URL : DELETE /api/panier/:id
+ */
+router.delete("/panier/:id", (req, res) => {
+    const produitId = req.params.id;
+    const clientId = req.query.client_id; // Récupérer client_id depuis les paramètres de l'URL
+
+    if (!clientId) {
+        return res.status(400).json({ message: "❌ client_id est requis" });
+    }
+
+    db.query("DELETE FROM panier WHERE produit_id = ? AND client_id = ?", [produitId, clientId], (err, result) => {
+        if (err) {
+            console.error("Erreur SQL :", err);
+            return res.status(500).json({ message: "❌ Erreur serveur" });
+        }
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: "⚠️ Article introuvable dans le panier" });
+        }
+
+        return res.status(200).json({ message: "✅ Article supprimé du panier" });
+    });
+});
+
+/**
+ * ➤ ROUTE : Mettre à jour la quantité d'un article
+ * ➤ URL : PUT /api/panier/:id
+ * ➤ Body attendu (JSON) :
+ * {
+ *     "quantite": 3
+ * }
+ */
+router.put("/panier/:id", (req, res) => {
+    const produitId = req.params.id;
+    const { quantite, client_id } = req.body; // Récupérer les données depuis le body
+
+    if (!quantite || !client_id) {
+        return res.status(400).json({ message: "❌ Quantité et client_id sont requis" });
+    }
+
+    console.log(`🔄 Mise à jour du produit ${produitId} pour le client ${client_id} avec quantité ${quantite}`);
+
+    db.query(
+        "UPDATE panier SET quantite = ? WHERE produit_id = ? AND client_id = ?",
+        [quantite, produitId, client_id],
+        (err, result) => {
+            if (err) {
+                console.error("❌ Erreur SQL :", err);
+                return res.status(500).json({ message: "❌ Erreur serveur" });
+            }
+
+            if (result.affectedRows === 0) {
+                return res.status(404).json({ message: "⚠️ Article introuvable dans le panier" });
+            }
+
+            return res.status(200).json({ message: "✅ Quantité mise à jour avec succès" });
+        }
+    );
+});
 
 /**
  * ➤ ROUTE : Passer une commande (nécessite un JSON avec client_id et un tableau produits)
